@@ -37,44 +37,129 @@ void st_usbfs_set_address(usbd_device *dev, uint8_t addr)
 	SET_REG(USB_DADDR_REG, (addr & USB_DADDR_ADDR) | USB_DADDR_EF);
 }
 
-/**
- * Set the receive buffer size for a given USB endpoint.
- *
- * @param dev the usb device handle returned from @ref usbd_init
- * @param ep Index of endpoint to configure.
- * @param size Size in bytes of the RX buffer. Legal sizes : {2,4,6...62}; {64,96,128...992}.
- * @returns (uint16) Actual size set
- */
-uint16_t st_usbfs_set_ep_rx_bufsize(usbd_device *dev, uint8_t ep, uint32_t size)
+struct st_usbfs_bufsize {
+    uint16_t realsize;
+    uint32_t bufsize;
+};
+
+static struct st_usbfs_bufsize st_usbfs_calculate_bufsize(uint32_t ep_size)
 {
-	uint16_t realsize;
-	(void)dev;
-	/*
-	 * Writes USB_COUNTn_RX reg fields : bits <14:10> are NUM_BLOCK; bit 15 is BL_SIZE
-	 * - When (size <= 62), BL_SIZE is set to 0 and NUM_BLOCK set to (size / 2).
-	 * - When (size > 62), BL_SIZE is set to 1 and NUM_BLOCK=((size / 32) - 1).
-	 *
-	 * This algo rounds to the next largest legal buffer size, except 0. Examples:
-	 *	size =>	BL_SIZE, NUM_BLOCK	=> Actual bufsize
-	 *	0		0		0			??? "Not allowed" according to RM0091, RM0008
-	 *	1		0		1			2
-	 *	61		0		31			62
-	 *	63		1		1			64
-	 */
-	if (size > 62) {
-		/* Round up, div by 32 and sub 1 == (size + 31)/32 - 1 == (size-1)/32)*/
-		size = ((size - 1) >> 5) & 0x1F;
-		realsize = (size + 1) << 5;
-		/* Set BL_SIZE bit (no macro for this) */
-		size |= (1<<5);
-	} else {
-		/* round up and div by 2 */
-		size = (size + 1) >> 1;
-		realsize = size << 1;
-	}
-	/* write to the BL_SIZE and NUM_BLOCK fields */
-	USB_SET_EP_RX_COUNT(ep, size << 10);
-	return realsize;
+    struct st_usbfs_bufsize result = {0, ep_size};
+
+    /*
+     * Writes USB_COUNTn_RX reg fields : bits <14:10> are NUM_BLOCK; bit 15 is BL_SIZE
+     * - When (size <= 62), BL_SIZE is set to 0 and NUM_BLOCK set to (size / 2).
+     * - When (size > 62), BL_SIZE is set to 1 and NUM_BLOCK=((size / 32) - 1).
+     *
+     * This algo rounds to the next largest legal buffer size, except 0. Examples:
+     *	size =>	BL_SIZE, NUM_BLOCK	=> Actual bufsize
+     *	0		0		0			??? "Not allowed" according to RM0091, RM0008
+     *	1		0		1			2
+     *	61		0		31			62
+     *	63		1		1			64
+     */
+    if (result.bufsize > 62) {
+        /* Round up, div by 32 and sub 1 == (size + 31)/32 - 1 == (size-1)/32)*/
+        result.bufsize = ((result.bufsize - 1) >> 5) & 0x1F;
+        result.realsize = (result.bufsize + 1) << 5;
+        /* Set BL_SIZE bit (no macro for this) */
+        result.bufsize |= (1<<5);
+    } else {
+        /* round up and div by 2 */
+        result.bufsize = (result.bufsize + 1) >> 1;
+        result.realsize = result.bufsize << 1;
+    }
+
+    result.bufsize <<= 10;
+    return result;
+}
+
+static const uint16_t typelookup[] = {
+    [USB_ENDPOINT_ATTR_CONTROL] = USB_EP_TYPE_CONTROL,
+    [USB_ENDPOINT_ATTR_ISOCHRONOUS] = USB_EP_TYPE_ISO,
+    [USB_ENDPOINT_ATTR_BULK] = USB_EP_TYPE_BULK,
+    [USB_ENDPOINT_ATTR_INTERRUPT] = USB_EP_TYPE_INTERRUPT
+};
+
+static void st_usbfs_ep_setup_single(usbd_device *dev, uint8_t addr, uint8_t type,
+        uint16_t max_size,
+        void (*callback) (usbd_device *usbd_dev,
+        uint8_t ep))
+{
+    uint8_t dir = addr & 0x80;
+    addr &= 0x7f;
+
+    /* Assign address. */
+    USB_SET_EP_ADDR(addr, addr);
+    USB_SET_EP_TYPE(addr, typelookup[type]);
+
+    if (dir || (addr == 0)) {
+        USB_SET_EP_TX_ADDR(addr, dev->pm_top);
+        if (callback) {
+            dev->user_callback_ctr[addr][USB_TRANSACTION_IN] =
+                (void *)callback;
+        }
+        USB_CLR_EP_TX_DTOG(addr);
+        USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_NAK);
+        dev->pm_top += max_size;
+    }
+
+    if (!dir) {
+        struct st_usbfs_bufsize bufsize = st_usbfs_calculate_bufsize(max_size);
+        USB_SET_EP_RX_ADDR(addr, dev->pm_top);
+        USB_SET_EP_RX_COUNT(addr, bufsize.bufsize);
+        if (callback) {
+            dev->user_callback_ctr[addr][USB_TRANSACTION_OUT] =
+                (void *)callback;
+        }
+        USB_CLR_EP_RX_DTOG(addr);
+        USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_VALID);
+        dev->pm_top += bufsize.realsize;
+    }
+}
+
+static void st_usbfs_ep_setup_double(usbd_device *dev, uint8_t addr, uint8_t type,
+        uint16_t max_size,
+        void (*callback) (usbd_device *usbd_dev,
+        uint8_t ep))
+{
+    uint8_t dir = addr & 0x80;
+    addr &= 0x7f;
+
+    /* Assign address. */
+    USB_SET_EP_ADDR(addr, addr);
+    USB_SET_EP_TYPE(addr, typelookup[type]);
+
+    if (dir || (addr == 0)) {
+        USB_SET_EP_TX_ADDR(addr, dev->pm_top); // TX0
+        dev->pm_top += max_size;
+        USB_SET_EP_RX_ADDR(addr, dev->pm_top); // TX1
+        dev->pm_top += max_size;
+        if (callback) {
+            dev->user_callback_ctr[addr][USB_TRANSACTION_IN] =
+                (void *)callback;
+        }
+        USB_CLR_EP_TX_DTOG(addr); // TX0
+        USB_CLR_EP_RX_DTOG(addr); // TX1
+        USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
+    }
+
+    if (!dir) {
+        struct st_usbfs_bufsize bufsize = st_usbfs_calculate_bufsize(max_size);
+        USB_SET_EP_TX_ADDR(addr, dev->pm_top); // RX0
+        USB_SET_EP_TX_COUNT(addr, bufsize.bufsize);
+        dev->pm_top += bufsize.realsize;
+        USB_SET_EP_RX_ADDR(addr, dev->pm_top); // RX1
+        USB_SET_EP_RX_COUNT(addr, bufsize.bufsize);
+        dev->pm_top += bufsize.realsize;
+        if (callback) {
+            dev->user_callback_ctr[addr][USB_TRANSACTION_OUT] =
+                (void *)callback;
+        }
+        USB_CLR_EP_TX_DTOG(addr); // RX0
+        USB_CLR_EP_RX_DTOG(addr); // RX1
+        USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_VALID);
+    }
 }
 
 void st_usbfs_ep_setup(usbd_device *dev, uint8_t addr, uint8_t type,
@@ -82,43 +167,10 @@ void st_usbfs_ep_setup(usbd_device *dev, uint8_t addr, uint8_t type,
 		void (*callback) (usbd_device *usbd_dev,
 		uint8_t ep))
 {
-	/* Translate USB standard type codes to STM32. */
-	const uint16_t typelookup[] = {
-		[USB_ENDPOINT_ATTR_CONTROL] = USB_EP_TYPE_CONTROL,
-		[USB_ENDPOINT_ATTR_ISOCHRONOUS] = USB_EP_TYPE_ISO,
-		[USB_ENDPOINT_ATTR_BULK] = USB_EP_TYPE_BULK,
-		[USB_ENDPOINT_ATTR_INTERRUPT] = USB_EP_TYPE_INTERRUPT,
-	};
-	uint8_t dir = addr & 0x80;
-	addr &= 0x7f;
-
-	/* Assign address. */
-	USB_SET_EP_ADDR(addr, addr);
-	USB_SET_EP_TYPE(addr, typelookup[type]);
-
-	if (dir || (addr == 0)) {
-		USB_SET_EP_TX_ADDR(addr, dev->pm_top);
-		if (callback) {
-			dev->user_callback_ctr[addr][USB_TRANSACTION_IN] =
-			    (void *)callback;
-		}
-		USB_CLR_EP_TX_DTOG(addr);
-		USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_NAK);
-		dev->pm_top += max_size;
-	}
-
-	if (!dir) {
-		uint16_t realsize;
-		USB_SET_EP_RX_ADDR(addr, dev->pm_top);
-		realsize = st_usbfs_set_ep_rx_bufsize(dev, addr, max_size);
-		if (callback) {
-			dev->user_callback_ctr[addr][USB_TRANSACTION_OUT] =
-			    (void *)callback;
-		}
-		USB_CLR_EP_RX_DTOG(addr);
-		USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_VALID);
-		dev->pm_top += realsize;
-	}
+    if (type != USB_ENDPOINT_ATTR_ISOCHRONOUS)
+        st_usbfs_ep_setup_single(dev, addr, type, max_size, callback);
+    else
+        st_usbfs_ep_setup_double(dev, addr, type, max_size, callback);
 }
 
 void st_usbfs_endpoints_reset(usbd_device *dev)
@@ -197,40 +249,82 @@ void st_usbfs_ep_nak_set(usbd_device *dev, uint8_t addr, uint8_t nak)
 	}
 }
 
+static uint16_t st_usbfs_ep_write_packet_single(uint8_t addr, const void *buf, uint16_t len)
+{
+    addr &= 0x7F;
+    if ((*USB_EP_REG(addr) & USB_EP_TX_STAT) == USB_EP_TX_STAT_VALID)
+        return 0;
+    st_usbfs_copy_to_pm(USB_GET_EP_TX_BUFF(addr), buf, len);
+    USB_SET_EP_TX_COUNT(addr, len);
+    USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
+    return len;
+}
+
+static uint16_t st_usbfs_ep_write_packet_isoch(uint8_t addr, const void *buf, uint16_t len)
+{
+    addr &= 0x7F;
+    if ((*USB_EP_REG(addr) & USB_EP_TX_STAT) != USB_EP_TX_STAT_VALID)
+        return 0;
+    const bool toggled = !(GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
+    volatile void *pm_buf = (toggled) ? USB_GET_EP_TX_BUFF(addr)
+                                      : USB_GET_EP_RX_BUFF(addr);
+    if (toggled)
+        USB_SET_EP_TX_COUNT(addr, len);
+    else
+        USB_SET_EP_RX_COUNT(addr, len);
+    st_usbfs_copy_to_pm(pm_buf, buf, len);
+    return len;
+}
+
 uint16_t st_usbfs_ep_write_packet(usbd_device *dev, uint8_t addr,
 				     const void *buf, uint16_t len)
 {
 	(void)dev;
-	addr &= 0x7F;
 
-	if ((*USB_EP_REG(addr) & USB_EP_TX_STAT) == USB_EP_TX_STAT_VALID) {
-		return 0;
-	}
+    if ((GET_REG(USB_EP_REG(addr)) & USB_EP_TYPE) == USB_EP_TYPE_ISO)
+        return st_usbfs_ep_write_packet_isoch(addr, buf, len);
+    return st_usbfs_ep_write_packet_single(addr, buf, len);
+}
 
-	st_usbfs_copy_to_pm(USB_GET_EP_TX_BUFF(addr), buf, len);
-	USB_SET_EP_TX_COUNT(addr, len);
-	USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
+static uint16_t st_usbfs_ep_read_packet_single(uint8_t addr, void *buf, uint16_t len)
+{
+    if ((*USB_EP_REG(addr) & USB_EP_RX_STAT) == USB_EP_RX_STAT_VALID)
+        return 0;
 
-	return len;
+    len = MIN(USB_GET_EP_RX_COUNT(addr) & 0x3ff, len);
+    st_usbfs_copy_from_pm(buf, USB_GET_EP_RX_BUFF(addr), len);
+    USB_CLR_EP_RX_CTR(addr);
+
+    if (!st_usbfs_force_nak[addr])
+        USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_VALID);
+
+    return len;
+}
+
+static uint16_t st_usbfs_ep_read_packet_isoch(uint8_t addr, void *buf, uint16_t len)
+{
+    if ((*USB_EP_REG(addr) & USB_EP_RX_STAT) != USB_EP_RX_STAT_VALID)
+        return 0;
+
+    const bool toggled = (GET_REG(USB_EP_REG(addr)) & USB_EP_RX_DTOG);
+    const volatile void *pm_buf = (toggled) ? USB_GET_EP_TX_BUFF(addr)
+                                            : USB_GET_EP_RX_BUFF(addr);
+    const uint16_t pm_len = ((toggled) ? USB_GET_EP_TX_COUNT(addr)
+                                       : USB_GET_EP_RX_COUNT(addr)) & 0x3ff;
+
+    len = MIN(pm_len, len);
+    st_usbfs_copy_from_pm(buf, pm_buf, len);
+    return len;
 }
 
 uint16_t st_usbfs_ep_read_packet(usbd_device *dev, uint8_t addr,
 					 void *buf, uint16_t len)
 {
 	(void)dev;
-	if ((*USB_EP_REG(addr) & USB_EP_RX_STAT) == USB_EP_RX_STAT_VALID) {
-		return 0;
-	}
 
-	len = MIN(USB_GET_EP_RX_COUNT(addr) & 0x3ff, len);
-	st_usbfs_copy_from_pm(buf, USB_GET_EP_RX_BUFF(addr), len);
-	USB_CLR_EP_RX_CTR(addr);
-
-	if (!st_usbfs_force_nak[addr]) {
-		USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_VALID);
-	}
-
-	return len;
+    if ((GET_REG(USB_EP_REG(addr)) & USB_EP_TYPE) == USB_EP_TYPE_ISO)
+        return st_usbfs_ep_read_packet_isoch(addr, buf, len);
+    return st_usbfs_ep_read_packet_single(addr, buf, len);
 }
 
 void st_usbfs_poll(usbd_device *dev)
