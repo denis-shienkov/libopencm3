@@ -129,6 +129,7 @@ static void st_usbfs_ep_setup_double(usbd_device *dev, uint8_t addr, uint8_t typ
     /* Assign address. */
     USB_SET_EP_ADDR(addr, addr);
     USB_SET_EP_TYPE(addr, typelookup[type]);
+    USB_SET_EP_KIND(addr);
 
     if (dir || (addr == 0)) {
         USB_SET_EP_TX_ADDR(addr, dev->pm_top); // TX0
@@ -265,7 +266,7 @@ static uint16_t st_usbfs_ep_write_packet_isoch(uint8_t addr, const void *buf, ui
     addr &= 0x7F;
     if ((*USB_EP_REG(addr) & USB_EP_TX_STAT) != USB_EP_TX_STAT_VALID)
         return 0;
-    const bool toggled = !(GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
+    const bool toggled = (GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
     volatile void *pm_buf = (toggled) ? USB_GET_EP_TX_BUFF(addr)
                                       : USB_GET_EP_RX_BUFF(addr);
     if (toggled)
