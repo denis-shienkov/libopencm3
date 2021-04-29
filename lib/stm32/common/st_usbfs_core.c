@@ -264,16 +264,15 @@ static uint16_t st_usbfs_ep_write_packet_single(uint8_t addr, const void *buf, u
 static uint16_t st_usbfs_ep_write_packet_isoch(uint8_t addr, const void *buf, uint16_t len)
 {
     addr &= 0x7F;
-    if ((*USB_EP_REG(addr) & USB_EP_TX_STAT) != USB_EP_TX_STAT_VALID)
-        return 0;
-    const bool toggled = (GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
-    volatile void *pm_buf = (toggled) ? USB_GET_EP_TX_BUFF(addr)
-                                      : USB_GET_EP_RX_BUFF(addr);
-    if (toggled)
+    const bool dtog_tx = (GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
+    if (dtog_tx) {
+        st_usbfs_copy_to_pm(USB_GET_EP_TX_BUFF(addr), buf, len);
         USB_SET_EP_TX_COUNT(addr, len);
-    else
+    } else {
+        st_usbfs_copy_to_pm(USB_GET_EP_RX_BUFF(addr), buf, len);
         USB_SET_EP_RX_COUNT(addr, len);
-    st_usbfs_copy_to_pm(pm_buf, buf, len);
+    }
+    USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
     return len;
 }
 
