@@ -129,9 +129,9 @@ static void st_usbfs_ep_setup_double(usbd_device *dev, uint8_t addr, uint8_t typ
     /* Assign address. */
     USB_SET_EP_ADDR(addr, addr);
     USB_SET_EP_TYPE(addr, typelookup[type]);
-    USB_SET_EP_KIND(addr);
+    USB_SET_EP_KIND(addr); // Makes sense only to the bulk end-points.
 
-    if (dir || (addr == 0)) {
+    if (dir) {
         USB_SET_EP_TX_ADDR(addr, dev->pm_top); // TX0
         dev->pm_top += max_size;
         USB_SET_EP_RX_ADDR(addr, dev->pm_top); // TX1
@@ -143,9 +143,8 @@ static void st_usbfs_ep_setup_double(usbd_device *dev, uint8_t addr, uint8_t typ
         USB_CLR_EP_TX_DTOG(addr); // TX0
         USB_CLR_EP_RX_DTOG(addr); // TX1
         USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
-    }
-
-    if (!dir) {
+        USB_SET_EP_RX_STAT(addr, USB_EP_RX_STAT_DISABLED);
+    } else {
         struct st_usbfs_bufsize bufsize = st_usbfs_calculate_bufsize(max_size);
         USB_SET_EP_TX_ADDR(addr, dev->pm_top); // RX0
         USB_SET_EP_TX_COUNT(addr, bufsize.bufsize);
@@ -266,11 +265,11 @@ static uint16_t st_usbfs_ep_write_packet_isoch(uint8_t addr, const void *buf, ui
     addr &= 0x7F;
     const bool dtog_tx = (GET_REG(USB_EP_REG(addr)) & USB_EP_TX_DTOG);
     if (dtog_tx) {
-        st_usbfs_copy_to_pm(USB_GET_EP_TX_BUFF(addr), buf, len);
-        USB_SET_EP_TX_COUNT(addr, len);
-    } else {
         st_usbfs_copy_to_pm(USB_GET_EP_RX_BUFF(addr), buf, len);
         USB_SET_EP_RX_COUNT(addr, len);
+    } else {
+        st_usbfs_copy_to_pm(USB_GET_EP_TX_BUFF(addr), buf, len);
+        USB_SET_EP_TX_COUNT(addr, len);
     }
     USB_SET_EP_TX_STAT(addr, USB_EP_TX_STAT_VALID);
     return len;
