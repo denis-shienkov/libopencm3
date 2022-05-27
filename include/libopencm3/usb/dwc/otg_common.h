@@ -254,6 +254,7 @@
 #define OTG_DCFG_PFIVL		0x1800
 
 /* OTG device status register (OTG_DSTS) */
+#define OTG_DSTS_FNSOF_MASK (0x3fff << 8)
 #define OTG_DSTS_SUSPSTS	(1 << 0)
 
 /* OTG Device IN Endpoint Common Interrupt Mask Register (OTG_DIEPMSK) */
@@ -324,6 +325,13 @@
 #define OTG_DOEPCTL0_MPSIZ_16		(0x2 << 0)
 #define OTG_DOEPCTL0_MPSIZ_8		(0x3 << 0)
 
+/* OTG Device IN Endpoint X Control Register (OTG_DIEPCTLx) */
+#define OTG_DIEPCTLX_EPENA          (1 << 31)
+#define OTG_DIEPCTLX_SODDFRM        (1 << 29)
+#define OTG_DIEPCTLX_SEVNFRM        (1 << 28)
+#define OTG_DIEPCTLX_CNAK           (1 << 26)
+#define OTG_DIEPCTLX_MPSIZ_MASK     (0x7ff << 0)
+
 /* OTG Device IN Endpoint Interrupt Register (OTG_DIEPINTx) */
 /* Bits 31:8 - Reserved */
 #define OTG_DIEPINTX_TXFE		(1 << 7)
@@ -356,7 +364,10 @@
 /* Bits 18:7 - Reserved */
 #define OTG_DIEPSIZ0_XFRSIZ_MASK	(0x7f << 0)
 
-
+/* OTG Device IN Endpoint X Transfer Size Register (OTG_DIEPTSIZx) */
+/* Bits 31:29 - Reserved */
+#define OTG_DIEPTSIZX_PKTCNT_MASK   (0x3ff << 19)
+#define OTG_DIEPTSIZX_XFRSIZ_MASK   (0x7ffff << 0)
 
 /* Host-mode CSRs */
 /* OTG Host non-periodic transmit FIFO size register

@@ -202,15 +202,52 @@ uint16_t dwc_ep_write_packet(usbd_device *usbd_dev, uint8_t addr,
 
 	addr &= 0x7F;
 
-	/* Return if endpoint is already enabled. */
-	if (REBASE(OTG_DIEPTSIZ(addr)) & OTG_DIEPSIZ0_PKTCNT) {
-		return 0;
-	}
+    if (addr == 0) {
+        /* Return if endpoint is already enabled. */
+        if (REBASE(OTG_DIEPTSIZ(addr)) & OTG_DIEPSIZ0_PKTCNT) {
+            return 0;
+        }
 
-	/* Enable endpoint for transmission. */
-	REBASE(OTG_DIEPTSIZ(addr)) = OTG_DIEPSIZ0_PKTCNT | len;
-	REBASE(OTG_DIEPCTL(addr)) |= OTG_DIEPCTL0_EPENA |
-				     OTG_DIEPCTL0_CNAK;
+        /* Up to 127 bytes. */
+        len &= OTG_DIEPSIZ0_XFRSIZ_MASK;
+
+        /* Set endpoint payload size. */
+        REBASE(OTG_DIEPTSIZ(addr)) = OTG_DIEPSIZ0_PKTCNT | len;
+
+        /* Enable endpoint for transmission. */
+        REBASE(OTG_DIEPCTL(addr)) |= OTG_DIEPCTL0_EPENA | OTG_DIEPCTL0_CNAK;
+    } else {
+        /* Return if endpoint is already enabled. */
+        if (REBASE(OTG_DIEPTSIZ(addr)) & OTG_DIEPTSIZX_PKTCNT_MASK) {
+            return 0;
+        }
+
+        /* Up to 524287 bytes. */
+        len &= OTG_DIEPTSIZX_XFRSIZ_MASK;
+
+        /* Set endpoint payload size. */
+        if (len == 0) {
+            REBASE(OTG_DIEPTSIZ(addr)) = (1 << 19);
+        } else {
+            REBASE(OTG_DIEPTSIZ(addr)) = len;
+
+            /* Get endpoint maximum size. */
+            const uint32_t max_size = REBASE(OTG_DIEPCTL(addr)) & OTG_DIEPCTLX_MPSIZ_MASK;
+            const uint32_t count = (len + max_size - 1) / max_size;
+            REBASE(OTG_DIEPTSIZ(addr)) |= (OTG_DIEPTSIZX_PKTCNT_MASK & (count << 19));
+        }
+
+        /* Get endpoint type. */
+        const uint32_t type = ((REBASE(OTG_DIEPCTL(addr)) & OTG_DIEPCTL0_EPTYP_MASK) >> 18);
+        if (type == USB_ENDPOINT_ATTR_ISOCHRONOUS) {
+            /* Set frame number flag only for isochronous endpoint. */
+            REBASE(OTG_DIEPCTL(addr)) |= ((REBASE(OTG_DSTS) & (1 << 8)) == 0)
+                    ? OTG_DIEPCTLX_SODDFRM : OTG_DIEPCTLX_SEVNFRM;
+        }
+
+        /* Enable endpoint for transmission. */
+        REBASE(OTG_DIEPCTL(addr)) |= OTG_DIEPCTLX_EPENA | OTG_DIEPCTLX_CNAK;
+    }
 
 	/* Copy buffer to endpoint FIFO, note - memcpy does not work.
 	 * ARMv7M supports non-word-aligned accesses, ARMv6M does not. */
